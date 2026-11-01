@@ -8,6 +8,81 @@ const pay = (bill: string, share: string, key: string) =>
   })
 
 describe('defensive behavior', () => {
+  it('preserves exact totals and insertion order across varied splits', async () => {
+    const { homeId, members } = await createHome([
+      'One',
+      'Two',
+      'Three',
+      'Four',
+      'Five',
+      'Six',
+      'Seven',
+    ])
+    for (const total of [
+      1,
+      2,
+      6,
+      7,
+      8,
+      13,
+      14,
+      15,
+      99,
+      100,
+      101,
+      999,
+      1000,
+      1001,
+      100001,
+      Number.MAX_SAFE_INTEGER,
+    ]) {
+      const { status, body: bill } = await createBill(homeId, total)
+      expect(status).toBe(201)
+      expect(bill.shares.map((share) => share.memberId)).toEqual(members.map((member) => member.id))
+      const cents = BigInt(total)
+      const count = BigInt(members.length)
+      const expected = members.map((_, index) =>
+        Number(cents / count + (BigInt(index) < cents % count ? 1n : 0n)),
+      )
+      expect(bill.shares.map((share) => share.amountCents)).toEqual(expected)
+      expect(bill.shares.reduce((sum, share) => sum + BigInt(share.amountCents), 0n)).toBe(cents)
+    }
+  })
+
+  it('scopes an idempotency key to each share, including zero-cent shares', async () => {
+    const { homeId } = await createHome(['One', 'Two'])
+    const { body: bill } = await createBill(homeId, 1)
+    for (const share of bill.shares) {
+      const first = await pay(bill.id, share.id, 'shared-key')
+      expect(first.status).toBe(200)
+      expect((await pay(bill.id, share.id, 'shared-key')).body).toEqual(first.body)
+    }
+    const balances = await call<{ balances: Balance[] }>('GET', `/api/homes/${homeId}/balances`)
+    expect(balances.body.balances.map((balance) => balance.outstandingCents)).toEqual([0, 0])
+  })
+
+  it('rolls back the bill if share insertion fails and returns a sanitized JSON error', async () => {
+    const { homeId } = await createHome(['One'])
+    // Force a storage failure for this home only; the trigger is removed even on assertion failure.
+    await env.DB.prepare(`CREATE TRIGGER review_reject_share BEFORE INSERT ON shares
+      WHEN NEW.home_id = '${homeId}' BEGIN SELECT RAISE(ABORT, 'forced review failure'); END`).run()
+    try {
+      const result = await call<{ error: string }>('POST', `/api/homes/${homeId}/bills`, {
+        body: { title: 'Rollback', totalCents: 100 },
+      })
+      expect(result.status).toBe(500)
+      expect(result.body).toEqual({ error: 'Something went wrong. Please retry.' })
+      const bills = await call<{ bills: Bill[] }>('GET', `/api/homes/${homeId}/bills`)
+      expect(bills.body.bills).toEqual([])
+      const shares = await env.DB.prepare('SELECT count(*) AS count FROM shares WHERE home_id = ?')
+        .bind(homeId)
+        .first<{ count: number }>()
+      expect(shares?.count).toBe(0)
+    } finally {
+      await env.DB.exec('DROP TRIGGER review_reject_share')
+    }
+  })
+
   it('allows exactly one competing payment key and replays only that result', async () => {
     const { homeId } = await createHome(['One', 'Two'])
     const { body: bill } = await createBill(homeId, 101)
