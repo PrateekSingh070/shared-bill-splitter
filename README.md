@@ -1,4 +1,14 @@
-# SDE Intern Assignment: Shared Bill Splitter
+# Shared Bill Splitter
+
+A TypeScript implementation of the DoCoDeGo Engineering internship assignment, prepared for Prateek Singh. Create a household, add members in order, split bills in whole cents, and record each member's settlement with retry-safe payments.
+
+**Run locally:** `pnpm install`, then `pnpm dev`. Open http://localhost:5173.
+
+**Verify:** `pnpm check && pnpm typecheck && pnpm test && pnpm build`.
+
+The implementation keeps the required Hono/Cloudflare D1 and React/TanStack Router stack. See [Decisions](#decisions) for the three main engineering choices and [WALKTHROUGH.md](WALKTHROUGH.md) for the architecture and interview preparation. GitHub Actions runs the same quality checks on pushes and pull requests.
+
+## Original assignment
 
 Welcome. In this assignment you build a small bill splitter for a shared home. It has two parts:
 
@@ -155,3 +165,28 @@ You must understand every line you submit. We check this with your video and in 
 5. Paste the repository link and the video link in the application form.
 
 We will run `pnpm install && pnpm check && pnpm typecheck && pnpm test` on your repository.
+
+## Decisions
+
+1. **Let SQLite protect consistency.** Named checks, unique keys and composite foreign keys reject invalid amounts, duplicate shares and cross-home relationships. Bill creation uses a D1 batch transaction and a single membership snapshot. An autoincrement sequence preserves insertion order even when timestamps would tie.
+2. **Use integer arithmetic and conditional payments.** Totals must be positive safe JavaScript integers. SQLite explicitly casts D1-bound numbers to integers before division; window functions allocate remainder cents in member order. Payment is a conditional SQL update on an unpaid share. The stored key and timestamp make retries stable, while a competing key receives 409.
+3. **Confirm payments before changing the page.** The client validates response shapes, catches server/network failures and aborts requests after 15 seconds. A failed payment leaves the share unpaid; retries reuse a share-specific key. This trades instant feedback for reliable state. Pending buttons explain the wait, and Refresh reconciles changes from other clients.
+
+## Using the completed app
+
+Run the installation and development commands above, then open http://localhost:5173.
+Create a home, add members, and enter bills in **whole cents**, not dollars. A home URL contains its ID and can be bookmarked or shared. You can also open a home by ID from the first screen. New members participate in future bills only. Zero-cent shares are valid when there are fewer cents than members.
+
+Two supporting read endpoints serve the page: `GET /api/homes/:homeId` returns the home and ordered members; `GET /api/homes/:homeId/bills` returns newest bills first, with ordered shares. Both return JSON 404s for unknown homes.
+
+`api/test/defensive.test.ts` adds concurrency, replay, malformed-input, safe-integer, cross-home constraint and persistence coverage. The original supplied tests and helper are unchanged. See [WALKTHROUGH.md](WALKTHROUGH.md) for architecture, constraints, failure demonstrations and a video outline.
+
+## Scope and limits
+
+This is the requested local assignment, with no authentication or real money transfer. Paying a share only records its settlement. Names/titles are trimmed and limited to 200 characters. Idempotency keys are scoped to a share and compared exactly; whitespace-only keys are rejected. Keys are kept in session storage when available and in memory otherwise. Reload-safe retries therefore depend on browser storage being enabled.
+
+Each bill supports up to `Number.MAX_SAFE_INTEGER` cents. An aggregate outstanding balance outside that range returns a JSON 500 instead of silently returning rounded money. Lists are unpaginated for this small assignment. Separate read requests can briefly observe different snapshots if another browser writes concurrently; Refresh reconciles them. There is no automatic polling. A production deployment would need authentication, pagination, and an actual Cloudflare D1 database ID; the supplied binding remains configured for local use.
+
+## AI disclosure
+
+OpenAI Codex assisted with implementation, defensive tests, UI styling, debugging and documentation. Review and adapt the code, and disclose that assistance in the application form. Record your own video and be ready to explain and refactor the submitted code without assistance.
